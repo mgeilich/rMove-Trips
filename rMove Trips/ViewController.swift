@@ -9,12 +9,13 @@
 /*
     rMove Trips uses location and motion to determine trip starts and stops.
     Motion events are processed and an activity is made 'active' when no events with
-    other modes are received for minTime.  When an activity is made active, all others
+    other types of motion are received for minTime.  When an activity is made active, all others
     are made inactive, so only one activity is active at a time.
  
     When an activity remains active for more than minDistance (minDistance is zero
     for 'stopped'), any trip in process is stopped.  If the new motion is not 'stopped'
-    then a new trip is started.
+    then a new trip is also started.  So trips can stop/start based on a mode change,
+    with the only dwell being the new mode's minTime.
  */
 
 import UIKit
@@ -64,6 +65,7 @@ class ViewController: UIViewController, CLLocationManagerDelegate {
     // A little state information.
     var tripInProgress: Bool = false
     var currentLocation = CLLocation()
+    var lastActivityUpdate = Date()
 
     override func viewDidLoad() {
         super.viewDidLoad()
@@ -76,6 +78,7 @@ class ViewController: UIViewController, CLLocationManagerDelegate {
         // Set the location parameters
         locationManager.requestAlwaysAuthorization()
         locationManager.desiredAccuracy = kCLLocationAccuracyBest
+        locationManager.allowsBackgroundLocationUpdates  = true
         locationManager.distanceFilter = 5.0   //Meters
         locationManager.delegate = self
         locationManager.startUpdatingLocation()
@@ -98,7 +101,6 @@ class ViewController: UIViewController, CLLocationManagerDelegate {
     }
     
     // Called each time location changes so we can check the motion queue, especially in the background
-    var lastActivityUpdate = Date()
     func checkMotionQueue() {
         motionActivityManager.queryActivityStarting(from: lastActivityUpdate+1, to: Date(), to: OperationQueue.main)
         { (motions, error) in
@@ -151,7 +153,6 @@ class ViewController: UIViewController, CLLocationManagerDelegate {
                         // Only set the startTime once, we can get the same activity multiple times in a row.
                         if self.activity[index].startTime == 0 {
                             self.activity[index].startTime = motion.startDate.timeIntervalSince1970
-                            lastActivityUpdate = motion.startDate   // Used to check the motion queue for new events
                             self.activity[index].startLocation = self.currentLocation
                         }
                     } else {
@@ -160,6 +161,7 @@ class ViewController: UIViewController, CLLocationManagerDelegate {
                     }
                 }
             }
+            lastActivityUpdate = Date()
         
             // Check to see if this activity has been on long enough to make it Active
             self.checkForNewActive(index)
@@ -202,17 +204,21 @@ class ViewController: UIViewController, CLLocationManagerDelegate {
     func checkForNewTrip() {
         for index in 0..<self.activity.count {
             // If we're going from any motion to stopped then we had a trip going.
-            if index == activityType.stopped  && self.activity[index].active {
+            if index == activityType.stopped  &&
+                        self.activity[index].active {
                 if tripInProgress {
-                    writeLog("\nTrip Ended", color: .white)
+                    writeLogWithDate(date: Date(timeIntervalSince1970:self.activity[index].startTime),
+                                     entry: "\nTrip Ended", color: .white)
                     tripInProgress = false
                 }
             } else {
-                if !tripInProgress && self.activity[index].active &&
+                if !tripInProgress &&
+                    self.activity[index].active &&
                     self.activity[index].startLocation.distance(from: currentLocation)  >
-                        self.activity[index].minDistance + currentLocation.horizontalAccuracy {
-                    tripInProgress = true
-                    writeLog("\nTrip Started", color: .white)
+                    self.activity[index].minDistance + currentLocation.horizontalAccuracy {
+                        tripInProgress = true
+                        writeLogWithDate(date: Date(timeIntervalSince1970:self.activity[index].startTime),
+                                     entry: "\nTrip Started", color: .white)
                 }
             }
         }
@@ -309,7 +315,9 @@ class ViewController: UIViewController, CLLocationManagerDelegate {
         if let location = locations.last {
             currentLocation = location
         }
-        checkMotionQueue()      // Grabs motion off the queue while in the background.
+        // May have moved enough distance without a new motion to call it a trip start.
+        self.checkForNewTrip()
+        self.checkMotionQueue()      // Grabs motion off the queue while in the background.
     }
     
     func locationManager(_ manager: CLLocationManager, didChangeAuthorization status: CLAuthorizationStatus) {
