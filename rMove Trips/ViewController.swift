@@ -12,10 +12,9 @@
     other types of motion are received for minTime.  When an activity is made active, all others
     are made inactive, so only one activity is active at a time.
  
-    When an activity remains active for more than minDistance (minDistance is zero
-    for 'stopped'), any trip in process is stopped.  If the new motion is not 'stopped'
-    then a new trip is also started.  So trips can stop/start based on a mode change,
-    with the only dwell being the new mode's minTime.
+    When an activity remains active for more than minDistance, any trip in process is stopped.
+    If the new motion is not 'stopped' then a new trip is also started.  So trips can stop/start
+    based on a mode change, with the only dwell being the new mode's minTime.
  */
 
 import UIKit
@@ -54,14 +53,16 @@ class ViewController: UIViewController, CLLocationManagerDelegate {
 
     // This is the guts of the behavior, parameters for each activity.
     var activity: [Activity] = [
-        Activity(name: " Stopped", active: false, minTime: 30.0, startTime: 0, minDistance: 0,    startLocation: CLLocation()),
-        Activity(name: " Walking", active: false, minTime: 30.0, startTime: 0, minDistance: 30.0, startLocation: CLLocation()),
-        Activity(name: " Running", active: false, minTime: 60.0, startTime: 0, minDistance: 30.0, startLocation: CLLocation()),
-        Activity(name: " Cycling", active: false, minTime: 60.0, startTime: 0, minDistance: 50.0, startLocation: CLLocation()),
-        Activity(name: " Vehicle", active: false, minTime: 60.0, startTime: 0, minDistance: 50.0, startLocation: CLLocation()),
-        Activity(name: " Unknown", active: false, minTime: 60.0, startTime: 0, minDistance: 100.0,startLocation: CLLocation())
+        Activity(name: "Stopped", active: false, minTime: 30.0, startTime: 0, minDistance: 0,    startLocation: CLLocation()),
+        Activity(name: "Walking", active: false, minTime: 30.0, startTime: 0, minDistance: 30.0, startLocation: CLLocation()),
+        Activity(name: "Running", active: false, minTime: 60.0, startTime: 0, minDistance: 30.0, startLocation: CLLocation()),
+        Activity(name: "Cycling", active: false, minTime: 60.0, startTime: 0, minDistance: 50.0, startLocation: CLLocation()),
+        Activity(name: "Vehicle", active: false, minTime: 60.0, startTime: 0, minDistance: 50.0, startLocation: CLLocation()),
+        Activity(name: "Unknown", active: false, minTime: 60.0, startTime: 0, minDistance: 100.0,startLocation: CLLocation())
     ]
     
+    var smallGeofence = CLCircularRegion(center: CLLocationCoordinate2D(), radius: 30.0, identifier: "smallGeofence")
+
     // A little state information.
     var tripInProgress: Bool = false
     var currentLocation = CLLocation()
@@ -74,17 +75,24 @@ class ViewController: UIViewController, CLLocationManagerDelegate {
         NotificationCenter.default.addObserver(self, selector: #selector(wasRotated), name: UIDevice.orientationDidChangeNotification, object: nil)
         UIApplication.shared.isIdleTimerDisabled = true
         
+        // Two output views and no need for storyboard, sweet.
+        setupLogs()
+        
+        // Set up the geofences
+        smallGeofence.notifyOnEntry = false
+        smallGeofence.notifyOnExit = true
         
         // Set the location parameters
         locationManager.requestAlwaysAuthorization()
-        locationManager.desiredAccuracy = kCLLocationAccuracyBest
+        locationManager.desiredAccuracy = kCLLocationAccuracyBestForNavigation
         locationManager.allowsBackgroundLocationUpdates  = true
-        locationManager.distanceFilter = 5.0   //Meters
+        locationManager.showsBackgroundLocationIndicator  = false
+        locationManager.distanceFilter = kCLDistanceFilterNone   //Meters
         locationManager.delegate = self
-        locationManager.startUpdatingLocation()
-        
-        // Two output views and no need for storyboard, sweet.
-        setupLogs()
+        locationManager.stopUpdatingLocation()
+        let smallGeofence = CLCircularRegion(center: locationManager.location!.coordinate, radius: 30.0, identifier: "smallGeofence")
+        locationManager.startMonitoring(for: smallGeofence)
+        writeLog("\nstart geofence", color:.white)
         
         // Start monitoring and handle callbacks.
         startWatchingMotion()
@@ -104,11 +112,14 @@ class ViewController: UIViewController, CLLocationManagerDelegate {
     func checkMotionQueue() {
         motionActivityManager.queryActivityStarting(from: lastActivityUpdate+1, to: Date(), to: OperationQueue.main)
         { (motions, error) in
-            for motion in motions! {
-                self.processMotion(motion)
+            if motions != nil {
+                for motion in motions! {
+                    self.processMotion(motion)
+                }
             }
         }
         lastActivityUpdate = Date()
+        locationManager.requestLocation()
     }
     
     func processMotion(_ motion: CMMotionActivity) {
@@ -142,26 +153,31 @@ class ViewController: UIViewController, CLLocationManagerDelegate {
             ].enumerated() {
                     
             if element {
+                let currentTime = motion.startDate
+                
                 // Log all transitions to the debug pane.
-                self.writeDebugWithDate(date: motion.startDate,
+                self.writeDebugWithDate(date: currentTime,
                                         entry: self.activity[index].name,
                                         color: self.color)
-                
+                                
                 // Go through the activity[] array and find the activity that matches this motion.
                 for index2 in 0..<self.activity.count {
                     if (index == index2) {
                         // Only set the startTime once, we can get the same activity multiple times in a row.
                         if self.activity[index].startTime == 0 {
-                            self.activity[index].startTime = motion.startDate.timeIntervalSince1970
+                            self.activity[index].startTime = currentTime.timeIntervalSince1970
                             self.activity[index].startLocation = self.currentLocation
+                            
+                            // Tune the location manager to this activity
+                            self.locationManager.activityType = element == motion.automotive ? .automotiveNavigation : .fitness
                         }
                     } else {
-                        // Get here to switch between activities.
+                        // Forget about any prior different activity
                         self.activity[index2].startTime = 0
                     }
                 }
+                lastActivityUpdate = currentTime
             }
-            lastActivityUpdate = Date()
         
             // Check to see if this activity has been on long enough to make it Active
             self.checkForNewActive(index)
@@ -191,6 +207,7 @@ class ViewController: UIViewController, CLLocationManagerDelegate {
                     if tripInProgress {
                         writeLog("\nTrip Ended", color: .white)
                         tripInProgress = false
+                        startGeofencing()
                     }
                 } else {
                     self.activity[index2].startTime = 0
@@ -209,7 +226,7 @@ class ViewController: UIViewController, CLLocationManagerDelegate {
                 if tripInProgress {
                     writeLogWithDate(date: Date(timeIntervalSince1970:self.activity[index].startTime),
                                      entry: "\nTrip Ended", color: .white)
-                    tripInProgress = false
+                    startGeofencing()
                 }
             } else {
                 if !tripInProgress &&
@@ -222,6 +239,19 @@ class ViewController: UIViewController, CLLocationManagerDelegate {
                 }
             }
         }
+    }
+    
+    func startGeofencing() {
+        locationManager.stopUpdatingLocation()
+        let smallGeofence = CLCircularRegion(center: locationManager.location!.coordinate, radius: 30.0, identifier: "smallGeofence")
+        locationManager.startMonitoring(for: smallGeofence)
+        writeLog("\nstart geofence", color:.white)
+    }
+    
+    func stopGeofencing() {
+        locationManager.stopMonitoring(for: smallGeofence)
+        locationManager.startUpdatingLocation()
+        writeLog("\nstop geofence", color:.white)
     }
     
     /* --------------------------------------------------------------------------------------------------- */
@@ -317,12 +347,24 @@ class ViewController: UIViewController, CLLocationManagerDelegate {
         }
         // May have moved enough distance without a new motion to call it a trip start.
         self.checkForNewTrip()
-        self.checkMotionQueue()      // Grabs motion off the queue while in the background.
     }
     
     func locationManager(_ manager: CLLocationManager, didChangeAuthorization status: CLAuthorizationStatus) {
         if status != .authorizedAlways {
             print("Not able to do background location")
+        }
+    }
+    
+    // called when user Enters a monitored region
+    func locationManager(_ manager: CLLocationManager, didEnterRegion region: CLRegion) {
+        writeLog("Entering region - this should never happen", color: .white)
+    }
+    
+    // called when user Exits a monitored region
+    func locationManager(_ manager: CLLocationManager, didExitRegion region: CLRegion) {
+        if region is CLCircularRegion {
+            self.checkMotionQueue()
+            stopGeofencing()
         }
     }
 
