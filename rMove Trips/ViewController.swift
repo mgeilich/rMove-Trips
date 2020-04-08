@@ -85,16 +85,14 @@ class ViewController: UIViewController, CLLocationManagerDelegate {
         // Set the location parameters
         locationManager.requestAlwaysAuthorization()
         locationManager.desiredAccuracy = kCLLocationAccuracyBestForNavigation
+        locationManager.activityType = .otherNavigation           // Don't let coordinates snap to nearest road
         locationManager.allowsBackgroundLocationUpdates  = true
         locationManager.showsBackgroundLocationIndicator  = false
         locationManager.distanceFilter = kCLDistanceFilterNone   //Meters
         locationManager.delegate = self
-        locationManager.stopUpdatingLocation()
-        let smallGeofence = CLCircularRegion(center: locationManager.location!.coordinate, radius: 30.0, identifier: "smallGeofence")
-        locationManager.startMonitoring(for: smallGeofence)
-        writeLog("\nstart geofence", color:.white)
         
         // Start monitoring and handle callbacks.
+        startGeofencing()
         startWatchingMotion()
     }
     
@@ -108,39 +106,24 @@ class ViewController: UIViewController, CLLocationManagerDelegate {
         }
     }
     
-    // Called each time location changes so we can check the motion queue, especially in the background
+    // Called on a geofence exit.  Only the last motion in the queue is correct for this location.
     func checkMotionQueue() {
         motionActivityManager.queryActivityStarting(from: lastActivityUpdate+1, to: Date(), to: OperationQueue.main)
         { (motions, error) in
-            if motions != nil {
-                for motion in motions! {
-                    self.processMotion(motion)
-                }
+            if let motion = motions?.last {
+                self.processMotion(motion)
             }
         }
-        lastActivityUpdate = Date()
-        locationManager.requestLocation()
     }
     
+    let confColor:[CMMotionActivityConfidence: UIColor] = [
+        .low: .red, .medium: .yellow, .high: .green]
+    
     func processMotion(_ motion: CMMotionActivity) {
-        // Set the color for the resulting text baseed on confidence
         if motion.confidence == .low {
             return      // These just aren't very good and we have plenty without them
         }
-                
-        switch motion.confidence {
-            case .high:
-                self.color = .green
-                break
-            case .medium:
-                self.color = .yellow
-                break
-            case .low:
-                self.color = .red
-                break
-            default:
-                self.color = .white
-        }
+        self.color = confColor[motion.confidence] ?? .white
                 
         // The ordering of these needs to match the activity[] array
         for (index, element) in [
@@ -167,9 +150,6 @@ class ViewController: UIViewController, CLLocationManagerDelegate {
                         if self.activity[index].startTime == 0 {
                             self.activity[index].startTime = currentTime.timeIntervalSince1970
                             self.activity[index].startLocation = self.currentLocation
-                            
-                            // Tune the location manager to this activity
-                            self.locationManager.activityType = element == motion.automotive ? .automotiveNavigation : .fitness
                         }
                     } else {
                         // Forget about any prior different activity
@@ -195,20 +175,20 @@ class ViewController: UIViewController, CLLocationManagerDelegate {
         let minTime = self.activity[index].minTime
         
         if startTime > 0 &&
-            NSDate().timeIntervalSince1970 - startTime > minTime &&
+            lastActivityUpdate.timeIntervalSince1970 - startTime > minTime &&
             self.activity[index].active == false {
 
             for index2 in 0..<self.activity.count {
                 if index == index2 {
-                    self.activity[index2].active = true
-                    writeLogWithDate(date: Date(timeIntervalSince1970: self.activity[index2].startTime),
-                                     entry: self.activity[index2].name,
+                    self.activity[index].active = true
+                    writeLogWithDate(date: Date(timeIntervalSince1970: self.activity[index].startTime),
+                                     entry: self.activity[index].name,
                                      color: self.color)
                     if tripInProgress {
                         writeLog("\nTrip Ended", color: .white)
                         tripInProgress = false
-                        startGeofencing()
                     }
+                    startGeofencing()
                 } else {
                     self.activity[index2].startTime = 0
                     self.activity[index2].active = false
@@ -225,7 +205,7 @@ class ViewController: UIViewController, CLLocationManagerDelegate {
                         self.activity[index].active {
                 if tripInProgress {
                     writeLogWithDate(date: Date(timeIntervalSince1970:self.activity[index].startTime),
-                                     entry: "\nTrip Ended", color: .white)
+                                     entry: "\nTrip Ended - shouldn't get here?", color: .white)
                     startGeofencing()
                 }
             } else {
@@ -241,17 +221,27 @@ class ViewController: UIViewController, CLLocationManagerDelegate {
         }
     }
     
+    var isGeofencing:Bool = false
     func startGeofencing() {
+        if isGeofencing {
+            return
+        }
         locationManager.stopUpdatingLocation()
         let smallGeofence = CLCircularRegion(center: locationManager.location!.coordinate, radius: 30.0, identifier: "smallGeofence")
         locationManager.startMonitoring(for: smallGeofence)
         writeLog("\nstart geofence", color:.white)
+        isGeofencing = true
     }
     
     func stopGeofencing() {
+        
+        if !isGeofencing {
+            return
+        }
         locationManager.stopMonitoring(for: smallGeofence)
         locationManager.startUpdatingLocation()
         writeLog("\nstop geofence", color:.white)
+        isGeofencing = false
     }
     
     /* --------------------------------------------------------------------------------------------------- */
@@ -299,14 +289,18 @@ class ViewController: UIViewController, CLLocationManagerDelegate {
     
     func writeLogWithDate(date: Date, entry: String, color: UIColor) {
         let dateFormatter = DateFormatter()
-        dateFormatter.dateFormat = "HH:mm:ss"
+        dateFormatter.timeZone = .current
+        dateFormatter.locale = Locale(identifier: "en_US_POSIX")
+        dateFormatter.dateFormat = "hh:mm:ss"
         let entry = "\n\(dateFormatter.string(from: date)): \(entry)"
         writeLog(entry, color: color)
     }
     
     func writeDebugWithDate(date: Date, entry: String, color: UIColor) {
         let dateFormatter = DateFormatter()
-        dateFormatter.dateFormat = "HH:mm:ss"
+        dateFormatter.timeZone = .current
+        dateFormatter.locale = Locale(identifier: "en_US_POSIX")
+        dateFormatter.dateFormat = "hh:mm:ss"
         let entry = "\n\(dateFormatter.string(from: date)): \(entry)"
         writeDebug(entry, color: color)
     }
